@@ -4,8 +4,22 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${POCODEX_PROJECT_DIR:-$SCRIPT_DIR}"
+MISE_SHIMS_DIR="${POCODEX_MISE_SHIMS_DIR:-$HOME/.local/share/mise/shims}"
+OMARCHY_BIN_DIR="${OMARCHY_PATH:-$HOME/.local/share/omarchy}/bin"
+
+prepend_path() {
+  if [[ -d "$1" && ":$PATH:" != *":$1:"* ]]; then
+    PATH="$1:$PATH"
+  fi
+}
+
+prepend_path "$OMARCHY_BIN_DIR"
+prepend_path "$HOME/.local/bin"
+prepend_path "$MISE_SHIMS_DIR"
+export PATH
+
 DEFAULT_APP_PATH="/home/justin/git/github/pocodex/Codex.app"
-DEFAULT_APP_SERVER="/home/justin/.local/share/mise/installs/node/25.8.0/bin/codex"
+DEFAULT_APP_SERVER="$MISE_SHIMS_DIR/codex"
 APP_PATH="${POCODEX_APP_PATH:-$DEFAULT_APP_PATH}"
 if [[ "$APP_PATH" == "$DEFAULT_APP_PATH" && ! -d "$APP_PATH" ]]; then
   APP_PATH="$PROJECT_DIR/Codex.app"
@@ -32,9 +46,11 @@ Usage:
 
 Environment:
 POCODEX_PROJECT_DIR   Project root (default: script directory)
+  POCODEX_MISE_SHIMS_DIR
+                      Mise shims directory (default: ~/.local/share/mise/shims)
   NODE_PATH             Path to node binary (default: node)
   POCODEX_APP_PATH      Default: /home/justin/git/github/pocodex/Codex.app
-  POCODEX_APP_SERVER    Default: /home/justin/.local/share/mise/installs/node/25.8.0/bin/codex
+  POCODEX_APP_SERVER    Default: ~/.local/share/mise/shims/codex
   POCODEX_LISTEN        Host:port to bind (default: 0.0.0.0:8787)
   POCODEX_TOKEN         Optional token for session auth
   POCODEX_LOG_FILE      Log file path (default: /tmp/pocodex.log)

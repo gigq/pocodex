@@ -41,16 +41,38 @@ pocodex --listen 0.0.0.0:8787 --token "$(openssl rand -hex 16)"
 
 When listening on `0.0.0.0`, Pocodex also prints a preferred LAN URL if it can find one.
 
+## Run At Startup
+
+On Linux hosts, you can run Pocodex at boot with `systemd`. This repo includes a sample unit at [pocodex.service](/home/justin/git/github/pocodex/pocodex.service) that launches [pocodex.sh](/home/justin/git/github/pocodex/pocodex.sh) with the Linux `codex` binary and a copied `Codex.app` bundle. The unit runs Pocodex in the foreground under `systemd`, so bind failures and other startup errors are reported correctly.
+
+Install and enable it:
+
+```bash
+sudo install -m 0644 /home/justin/git/github/pocodex/pocodex.service /etc/systemd/system/pocodex.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now pocodex.service
+```
+
+Useful service commands:
+
+```bash
+sudo systemctl status pocodex.service
+sudo systemctl restart pocodex.service
+sudo journalctl -u pocodex.service -f
+tail -f /var/log/pocodex/pocodex.log
+```
+
 ## CLI
 
 ```text
-pocodex [--token <secret>] [--app /Applications/Codex.app] [--listen 127.0.0.1:8787] [--dev]
+`pocodex [--token <secret>] [--app /Applications/Codex.app] [--app-server <path>] [--listen 127.0.0.1:8787] [--dev]`
 ```
 
 ### Flags
 
 - `--token` optional session secret used to authorize the browser session
 - `--app` path to the Codex app bundle
+- `--app-server` optional override for the `codex app-server` binary path (defaults to `Contents/Resources/codex` in the app bundle)
 - `--listen` host and port to bind, for example `127.0.0.1:8787` or `0.0.0.0:8787`
 - `--dev` watches `src/pocodex.css` and pushes live CSS reload events to the connected browser
 

@@ -1,0 +1,24 @@
+[Unit]
+Description=Pocodex Web Bridge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=justin
+WorkingDirectory=/home/justin/git/github/pocodex
+Environment=POCODEX_PROJECT_DIR=/home/justin/git/github/pocodex
+Environment=POCODEX_APP_PATH=/home/justin/git/github/pocodex/Codex.app
+Environment=PATH=/home/justin/.local/share/mise/shims:/home/justin/.local/bin:/home/justin/.local/share/omarchy/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/bin/site_perl:/usr/bin/vendor_perl:/usr/bin/core_perl
+Environment=POCODEX_APP_SERVER=/home/justin/.local/share/mise/shims/codex
+Environment=POCODEX_LISTEN=0.0.0.0:8788
+Environment=POCODEX_FOREGROUND=1
+ExecStart=/home/justin/git/github/pocodex/pocodex.sh
+LogsDirectory=pocodex
+StandardOutput=append:/var/log/pocodex/pocodex.log
+StandardError=append:/var/log/pocodex/pocodex.log
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
