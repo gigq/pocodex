@@ -187,9 +187,16 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       },
     });
     this.syncWorkspaceGlobalState();
+    const appServerArgs = ["app-server"];
+    if (options.appServerYolo) {
+      appServerArgs.push("-c", 'approval_policy="never"');
+      appServerArgs.push("-c", 'sandbox_mode="danger-full-access"');
+    }
+    appServerArgs.push("--listen", "stdio://");
+
     this.child = spawn(
       deriveCodexCliBinaryPath(options.appPath, options.appServerPath),
-      ["app-server", ...(options.appServerYolo ? ["--yolo"] : []), "--listen", "stdio://"],
+      appServerArgs,
       {
         stdio: "pipe",
       },
