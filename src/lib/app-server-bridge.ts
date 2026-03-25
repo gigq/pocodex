@@ -1285,6 +1285,16 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           status: 200,
           body: await resolveGitOrigins(body, this.getGitOriginFallbackDirectories()),
         };
+      case "git-create-branch":
+        return {
+          status: 200,
+          body: await createGitBranch(body),
+        };
+      case "git-checkout-branch":
+        return {
+          status: 200,
+          body: await checkoutGitBranch(body),
+        };
       default:
         return null;
     }
@@ -1863,8 +1873,195 @@ function readGitOriginDirectories(body: unknown): string[] {
   return uniqueStrings(params.dirs);
 }
 
+async function createGitBranch(body: unknown): Promise<{
+  status: "success" | "error";
+  branch?: string;
+  error?: string;
+  execOutput?: {
+    command: string;
+    output: string;
+  };
+}> {
+  const cwd = isJsonRecord(body) && typeof body.cwd === "string" ? body.cwd.trim() : "";
+  if (cwd.length === 0) {
+    return {
+      status: "error",
+      error: "No workspace available for branch creation",
+    };
+  }
+
+  const branch = isJsonRecord(body) && typeof body.branch === "string" ? body.branch.trim() : "";
+  if (branch.length === 0) {
+    return {
+      status: "error",
+      error: "Branch name is required",
+    };
+  }
+
+  const mode = isJsonRecord(body) && body.mode === "synced" ? "synced" : "worktree";
+  const repository = await resolveGitRepository(cwd, new Map());
+  if (!repository) {
+    return {
+      status: "error",
+      error: "No git repository found for branch creation",
+    };
+  }
+
+  const targetCwd = mode === "synced" ? repository.root : cwd;
+  const branchRef = `refs/heads/${branch}`;
+  const existingBranch = await execGitCommand(targetCwd, ["show-ref", "--verify", branchRef]);
+  if (existingBranch.success) {
+    return {
+      status: "success",
+      branch,
+    };
+  }
+
+  const createBranchResult = await execGitCommand(targetCwd, ["branch", branch]);
+  if (createBranchResult.success) {
+    return {
+      status: "success",
+      branch,
+    };
+  }
+
+  const headResult = await execGitCommand(targetCwd, ["rev-parse", "--verify", "HEAD"]);
+  if (!headResult.success) {
+    const switchCreateResult = await execGitCommand(targetCwd, ["switch", "-c", branch]);
+    if (switchCreateResult.success) {
+      return {
+        status: "success",
+        branch,
+      };
+    }
+
+    return {
+      status: "error",
+      error: switchCreateResult.stderr || switchCreateResult.stdout || "Failed to create branch",
+      execOutput: buildGitExecOutput(switchCreateResult),
+    };
+  }
+
+  return {
+    status: "error",
+    error: createBranchResult.stderr || createBranchResult.stdout || "Failed to create branch",
+    execOutput: buildGitExecOutput(createBranchResult),
+  };
+}
+
+async function checkoutGitBranch(body: unknown): Promise<{
+  status: "success" | "error";
+  branch?: string;
+  stashRef?: string | null;
+  error?: string;
+  errorType?: string;
+  conflictedPaths?: string[];
+  execOutput?: {
+    command: string;
+    output: string;
+  };
+}> {
+  const cwd = isJsonRecord(body) && typeof body.cwd === "string" ? body.cwd.trim() : "";
+  if (cwd.length === 0) {
+    return {
+      status: "error",
+      error: "No workspace available for branch checkout",
+      errorType: "unknown",
+    };
+  }
+
+  const branch = isJsonRecord(body) && typeof body.branch === "string" ? body.branch.trim() : "";
+  if (branch.length === 0) {
+    return {
+      status: "error",
+      error: "Branch name is required",
+      errorType: "unknown",
+    };
+  }
+
+  const stashUncommitted =
+    isJsonRecord(body) && typeof body.stashUncommitted === "boolean"
+      ? body.stashUncommitted
+      : false;
+
+  let stashRef: string | null = null;
+  if (stashUncommitted) {
+    const stashPushResult = await execGitCommand(cwd, [
+      "stash",
+      "push",
+      "--include-untracked",
+      "-m",
+      "Stashed Codex worktree changes",
+    ]);
+    const noChangesToSave =
+      stashPushResult.stdout.includes("No local changes to save") ||
+      stashPushResult.stderr.includes("No local changes to save");
+    if (!stashPushResult.success && !noChangesToSave) {
+      return {
+        status: "error",
+        error: stashPushResult.stderr || stashPushResult.stdout || "Failed to stash changes",
+        errorType: "failed-to-stash-changes",
+        execOutput: buildGitExecOutput(stashPushResult),
+      };
+    }
+
+    if (!noChangesToSave) {
+      const stashRefResult = await execGitCommand(cwd, ["rev-parse", "--verify", "refs/stash"]);
+      if (!stashRefResult.success || stashRefResult.stdout.length === 0) {
+        return {
+          status: "error",
+          error:
+            stashRefResult.stderr || stashRefResult.stdout || "Failed to resolve stash reference",
+          errorType: "failed-to-stash-changes",
+          execOutput: buildGitExecOutput(stashRefResult),
+        };
+      }
+      stashRef = stashRefResult.stdout;
+    }
+  }
+
+  const checkoutResult = await execGitCommand(cwd, ["checkout", branch]);
+  if (!checkoutResult.success) {
+    const rollbackMessage = await popStashRollback(cwd, stashRef);
+    const conflictedPaths = extractCheckoutConflictedPaths(
+      checkoutResult.stdout,
+      checkoutResult.stderr,
+    );
+    const error = checkoutResult.stderr || checkoutResult.stdout || "Failed to checkout branch";
+    return {
+      status: "error",
+      error: rollbackMessage ? `${error}\n${rollbackMessage}` : error,
+      errorType: conflictedPaths.length > 0 ? "blocked-by-working-tree-changes" : "unknown",
+      conflictedPaths: conflictedPaths.length > 0 ? conflictedPaths : undefined,
+      execOutput: buildGitExecOutput(checkoutResult),
+    };
+  }
+
+  return {
+    status: "success",
+    branch,
+    stashRef,
+  };
+}
+
 async function runGitCommand(cwd: string, args: string[]): Promise<string> {
-  return new Promise<string>((resolveOutput, reject) => {
+  const result = await execGitCommand(cwd, args);
+  if (!result.success) {
+    throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
+  }
+  return result.stdout;
+}
+
+async function execGitCommand(
+  cwd: string,
+  args: string[],
+): Promise<{
+  command: string;
+  success: boolean;
+  stdout: string;
+  stderr: string;
+}> {
+  return new Promise((resolveResult) => {
     execFile(
       "git",
       args,
@@ -1873,15 +2070,80 @@ async function runGitCommand(cwd: string, args: string[]): Promise<string> {
         encoding: "utf8",
         maxBuffer: 1024 * 1024,
       },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
         if (error) {
-          reject(error);
+          resolveResult({
+            command: ["git", ...args].join(" "),
+            success: false,
+            stdout: stdout.trim(),
+            stderr: stderr.trim(),
+          });
           return;
         }
-        resolveOutput(stdout.trim());
+        resolveResult({
+          command: ["git", ...args].join(" "),
+          success: true,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+        });
       },
     );
   });
+}
+
+function buildGitExecOutput(result: { command: string; stdout: string; stderr: string }): {
+  command: string;
+  output: string;
+} {
+  return {
+    command: result.command,
+    output: result.stderr || result.stdout,
+  };
+}
+
+async function popStashRollback(cwd: string, stashRef: string | null): Promise<string | null> {
+  if (stashRef == null) {
+    return null;
+  }
+
+  const popResult = await execGitCommand(cwd, ["stash", "pop", "stash@{0}"]);
+  if (popResult.success) {
+    return null;
+  }
+
+  return popResult.stderr || popResult.stdout || "Failed to restore stashed changes";
+}
+
+function extractCheckoutConflictedPaths(stdout: string, stderr: string): string[] {
+  const output = `${stdout}\n${stderr}`;
+  const lines = output.split(/\r?\n/);
+  const paths = new Set<string>();
+  let readingPaths = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!readingPaths) {
+      if (/\bwould be overwritten by checkout:\s*$/i.test(line)) {
+        readingPaths = true;
+      }
+      continue;
+    }
+
+    if (line.length === 0) {
+      continue;
+    }
+    const normalized = line.toLowerCase();
+    if (
+      normalized.startsWith("please ") ||
+      normalized.startsWith("error:") ||
+      normalized === "aborting"
+    ) {
+      break;
+    }
+    paths.add(line);
+  }
+
+  return [...paths];
 }
 
 function extractJsonRpcErrorMessage(error: unknown): string {
