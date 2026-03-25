@@ -1296,6 +1296,100 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           body: await checkoutGitBranch(body),
         };
       default:
+        {
+          const desktopHandled = await this.handleDesktopHostMethod(path, body);
+          if (desktopHandled) {
+            return desktopHandled;
+          }
+        }
+        try {
+          return {
+            status: 200,
+            body: await this.sendLocalRequest(path, body),
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (isMethodNotFoundError(message)) {
+            return null;
+          }
+          throw error;
+        }
+    }
+  }
+
+  private async handleDesktopHostMethod(
+    path: string,
+    body: unknown,
+  ): Promise<{ status: number; body: unknown } | null> {
+    switch (path) {
+      case "electron-clone-workspace-repo":
+        return {
+          status: 200,
+          body: {
+            success: false,
+            canceled: false,
+            error: "Not implemented in Pocodex.",
+          },
+        };
+      case "generate-thread-title":
+        return {
+          status: 200,
+          body: {
+            title: null,
+          },
+        };
+      case "generate-commit-message":
+        return {
+          status: 200,
+          body: await generateCommitMessage(body),
+        };
+      case "generate-pull-request-message":
+        return {
+          status: 200,
+          body: {
+            title: null,
+            body: null,
+          },
+        };
+      case "git-merge-base":
+        return {
+          status: 200,
+          body: await resolveGitMergeBase(body),
+        };
+      case "read-git-file-binary":
+        return {
+          status: 200,
+          body: {
+            contentsBase64: null,
+          },
+        };
+      case "remote-workspace-directory-entries":
+        return {
+          status: 200,
+          body: [],
+        };
+      case "set-configuration":
+        return {
+          status: 200,
+          body: {
+            success: true,
+          },
+        };
+      case "upload-worktree-snapshot":
+        return {
+          status: 200,
+          body: {
+            success: false,
+          },
+        };
+      case "worktree-shell-environment-config":
+        return {
+          status: 200,
+          body: {
+            shellEnvironment: null,
+          },
+        };
+      default:
         return null;
     }
   }
@@ -1751,6 +1845,11 @@ function buildIpcSuccessResponse(requestId: string, result: unknown): JsonRecord
   };
 }
 
+function isMethodNotFoundError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes("method not found") || normalized.includes("-32601");
+}
+
 async function resolveGitOrigins(
   body: unknown,
   fallbackDirs: string[],
@@ -1793,6 +1892,193 @@ async function resolveGitOrigins(
     origins: Array.from(originsByDir.values()),
     homeDir: homedir(),
   };
+}
+
+async function resolveGitMergeBase(body: unknown): Promise<{
+  mergeBaseSha: string | null;
+}> {
+  const gitRoot = isJsonRecord(body) && typeof body.gitRoot === "string" ? body.gitRoot.trim() : "";
+  const baseBranch =
+    isJsonRecord(body) && typeof body.baseBranch === "string" ? body.baseBranch.trim() : "";
+
+  if (gitRoot.length === 0 || baseBranch.length === 0) {
+    return {
+      mergeBaseSha: null,
+    };
+  }
+
+  const result = await execGitCommand(gitRoot, ["merge-base", "HEAD", baseBranch]);
+  return {
+    mergeBaseSha: result.success && result.stdout.length > 0 ? result.stdout : null,
+  };
+}
+
+async function generateCommitMessage(body: unknown): Promise<{
+  message: string | null;
+}> {
+  const cwd = isJsonRecord(body) && typeof body.cwd === "string" ? body.cwd.trim() : "";
+  if (cwd.length === 0) {
+    return {
+      message: null,
+    };
+  }
+
+  const prompt = isJsonRecord(body) && typeof body.prompt === "string" ? body.prompt.trim() : "";
+  const repository = await resolveGitRepository(cwd, new Map());
+  const repoCwd = repository?.root ?? cwd;
+  const stagedFilesResult = await execGitCommand(repoCwd, [
+    "diff",
+    "--cached",
+    "--name-only",
+    "--diff-filter=ACDMRTUXB",
+  ]);
+  const stagedFiles = stagedFilesResult.success
+    ? stagedFilesResult.stdout
+        .split(/\r?\n/)
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0)
+    : [];
+
+  if (stagedFiles.length === 0) {
+    return {
+      message: null,
+    };
+  }
+
+  const type = inferCommitType(prompt, stagedFiles);
+  const scope = inferCommitScope(prompt, stagedFiles);
+  const summary = inferCommitSummary(prompt, stagedFiles);
+
+  return {
+    message: scope.length > 0 ? `${type}(${scope}): ${summary}` : `${type}: ${summary}`,
+  };
+}
+
+function inferCommitType(prompt: string, stagedFiles: string[]): string {
+  const promptLower = prompt.toLowerCase();
+  if (stagedFiles.every(isDocumentationFile)) {
+    return "docs";
+  }
+  if (stagedFiles.every(isTestFile)) {
+    return "test";
+  }
+  if (stagedFiles.every(isCiFile)) {
+    return "ci";
+  }
+  if (stagedFiles.every(isBuildFile)) {
+    return "build";
+  }
+  if (/\b(refactor|cleanup|restructure|rename)\b/.test(promptLower)) {
+    return "refactor";
+  }
+  if (/\b(add|support|enable|allow|introduce|implement)\b/.test(promptLower)) {
+    return "feat";
+  }
+  return "fix";
+}
+
+function inferCommitScope(prompt: string, stagedFiles: string[]): string {
+  const combined = `${prompt}\n${stagedFiles.join("\n")}`.toLowerCase();
+  if (/\b(git|branch|commit|worktree)\b/.test(combined)) {
+    return "git";
+  }
+  if (stagedFiles.some((file) => file.includes("app-server-bridge"))) {
+    return "app-server-bridge";
+  }
+  if (stagedFiles.some((file) => file.includes("codex-desktop-git-worker"))) {
+    return "git-worker";
+  }
+  if (stagedFiles.some((file) => file.endsWith("package.json"))) {
+    return "";
+  }
+  if (stagedFiles.length === 1) {
+    return normalizeCommitToken(stripFileExtension(lastPathComponent(stagedFiles[0])));
+  }
+  return "";
+}
+
+function inferCommitSummary(prompt: string, stagedFiles: string[]): string {
+  const combined = `${prompt}\n${stagedFiles.join("\n")}`.toLowerCase();
+  if (/\b(commit)\b/.test(combined) && /\b(worktree)\b/.test(combined)) {
+    return "improve desktop git commit and worktree flows";
+  }
+  if (/\b(worktree)\b/.test(combined)) {
+    return "improve desktop git worktree flows";
+  }
+  if (/\b(git|branch|commit)\b/.test(combined)) {
+    return "improve desktop git flows";
+  }
+  if (stagedFiles.every(isDocumentationFile)) {
+    return "update documentation";
+  }
+  if (stagedFiles.every(isTestFile)) {
+    return "update tests";
+  }
+  if (stagedFiles.every(isCiFile)) {
+    return "update ci configuration";
+  }
+  if (stagedFiles.every(isBuildFile)) {
+    return "update build configuration";
+  }
+  if (stagedFiles.length === 1) {
+    return `update ${normalizeCommitToken(stripFileExtension(lastPathComponent(stagedFiles[0])))}`;
+  }
+  return `update ${stagedFiles.length} files`;
+}
+
+function isDocumentationFile(file: string): boolean {
+  const normalized = file.toLowerCase();
+  return (
+    normalized.endsWith(".md") || normalized.startsWith("docs/") || normalized.includes("/docs/")
+  );
+}
+
+function isTestFile(file: string): boolean {
+  const normalized = file.toLowerCase();
+  return (
+    normalized.includes("/test/") ||
+    normalized.includes("/tests/") ||
+    normalized.includes("__tests__") ||
+    normalized.endsWith(".test.ts") ||
+    normalized.endsWith(".test.tsx") ||
+    normalized.endsWith(".spec.ts") ||
+    normalized.endsWith(".spec.tsx")
+  );
+}
+
+function isCiFile(file: string): boolean {
+  const normalized = file.toLowerCase();
+  return normalized.startsWith(".github/workflows/") || normalized.startsWith(".buildkite/");
+}
+
+function isBuildFile(file: string): boolean {
+  const normalized = file.toLowerCase();
+  return (
+    normalized === "package.json" ||
+    normalized === "pnpm-lock.yaml" ||
+    normalized === "package-lock.json" ||
+    normalized === "tsconfig.json" ||
+    normalized.endsWith(".config.js") ||
+    normalized.endsWith(".config.cjs") ||
+    normalized.endsWith(".config.mjs") ||
+    normalized.startsWith("scripts/")
+  );
+}
+
+function lastPathComponent(file: string): string {
+  const segments = file.split(/[\\/]+/).filter((segment) => segment.length > 0);
+  return segments.length > 0 ? segments[segments.length - 1] : file;
+}
+
+function stripFileExtension(file: string): string {
+  return file.replace(/\.[^.]+$/, "");
+}
+
+function normalizeCommitToken(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 async function resolveGitOrigin(

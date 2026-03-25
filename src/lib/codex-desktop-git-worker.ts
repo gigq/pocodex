@@ -182,6 +182,18 @@ export class DefaultCodexDesktopGitWorkerBridge
         this.pendingRequests.delete(responseId);
       }
 
+      const workerError = extractWorkerErrorResponse(message);
+      if (workerError) {
+        console.error(`[git-worker] ${workerError.method} failed: ${workerError.error}`);
+      }
+
+      const workerStatusError = extractWorkerStatusError(message);
+      if (workerStatusError) {
+        console.error(
+          `[git-worker] ${workerStatusError.method} failed: ${workerStatusError.error}`,
+        );
+      }
+
       this.emit("message", message);
     });
 
@@ -342,6 +354,102 @@ function extractWorkerResponseId(message: unknown): string | null {
     return null;
   }
   return String(response.id);
+}
+
+function extractWorkerErrorResponse(message: unknown): {
+  id: string;
+  method: string;
+  error: string;
+} | null {
+  if (!isJsonRecord(message) || message.type !== "worker-response") {
+    return null;
+  }
+
+  const response = isJsonRecord(message.response) ? message.response : null;
+  if (
+    !response ||
+    (typeof response.id !== "string" && typeof response.id !== "number") ||
+    typeof response.method !== "string"
+  ) {
+    return null;
+  }
+
+  const result = isJsonRecord(response.result) ? response.result : null;
+  if (!result || result.type !== "error") {
+    return null;
+  }
+
+  const error = isJsonRecord(result.error) ? result.error : null;
+  return {
+    id: String(response.id),
+    method: response.method,
+    error:
+      typeof error?.message === "string" && error.message.length > 0
+        ? error.message
+        : "Unknown worker error",
+  };
+}
+
+function extractWorkerStatusError(message: unknown): {
+  id: string;
+  method: string;
+  error: string;
+} | null {
+  if (!isJsonRecord(message) || message.type !== "worker-response") {
+    return null;
+  }
+
+  const response = isJsonRecord(message.response) ? message.response : null;
+  if (
+    !response ||
+    (typeof response.id !== "string" && typeof response.id !== "number") ||
+    typeof response.method !== "string"
+  ) {
+    return null;
+  }
+
+  const result = isJsonRecord(response.result) ? response.result : null;
+  if (!result) {
+    return null;
+  }
+
+  const directStatusError = readStatusError(result);
+  if (directStatusError) {
+    return {
+      id: String(response.id),
+      method: response.method,
+      error: directStatusError,
+    };
+  }
+
+  const value = isJsonRecord(result.value) ? result.value : null;
+  const nestedStatusError = value ? readStatusError(value) : null;
+  if (!nestedStatusError) {
+    return null;
+  }
+
+  return {
+    id: String(response.id),
+    method: response.method,
+    error: nestedStatusError,
+  };
+}
+
+function readStatusError(value: Record<string, unknown>): string | null {
+  if (value.status !== "error") {
+    return null;
+  }
+
+  if (typeof value.error === "string" && value.error.length > 0) {
+    return value.error;
+  }
+
+  const execOutput = isJsonRecord(value.execOutput) ? value.execOutput : null;
+  if (typeof execOutput?.output === "string" && execOutput.output.length > 0) {
+    return execOutput.output;
+  }
+
+  return "Unknown worker status error";
 }
 
 function isWorkerMainRpcRequestEnvelope(value: unknown): value is WorkerMainRpcRequestEnvelope {
