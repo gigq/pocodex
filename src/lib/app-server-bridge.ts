@@ -2719,7 +2719,7 @@ async function createPullRequest(body: unknown): Promise<{
   const headRemoteName =
     (await resolveConfiguredBranchRemote(repoCwd, currentBranch)) ??
     (await resolveFirstGitRemote(repoCwd));
-  const baseRemoteName = (await resolveExistingRemote(repoCwd, "origin")) ?? headRemoteName;
+  const baseRemoteName = headRemoteName ?? (await resolveExistingRemote(repoCwd, "origin"));
   const headRemoteUrl =
     headRemoteName == null ? null : await resolveGitRemoteUrl(repoCwd, headRemoteName);
   const baseRemoteUrl =
@@ -2747,6 +2747,18 @@ async function createPullRequest(body: unknown): Promise<{
 
   const result = await execGhCommand(cwd, args);
   if (!result.success) {
+    const existingOutput = `${result.stdout}\n${result.stderr}`.trim();
+    const existingUrl = extractFirstUrl(existingOutput);
+    if (
+      existingUrl &&
+      existingOutput.toLowerCase().includes("pull request") &&
+      existingOutput.toLowerCase().includes("already exists")
+    ) {
+      return {
+        status: "success",
+        url: existingUrl,
+      };
+    }
     return {
       status: "error",
       error: result.stderr || result.stdout || "Failed to create pull request",
