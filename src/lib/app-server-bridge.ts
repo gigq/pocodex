@@ -123,11 +123,20 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly localRequests = new Map<
     string,
     {
+      method: string;
+      startedAt: number;
       resolve: (value: unknown) => void;
       reject: (reason?: unknown) => void;
     }
   >();
   private readonly fetchRequests = new Map<string, AbortController>();
+  private readonly hostFetchCache = new Map<
+    string,
+    {
+      expiresAt: number;
+      response: { status: number; body: unknown };
+    }
+  >();
   private readonly persistedAtoms = new Map<string, unknown>();
   private readonly globalState = new Map<string, unknown>();
   private readonly pinnedThreadIds = new Set<string>();
@@ -822,7 +831,6 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
     const controller = new AbortController();
     this.fetchRequests.set(message.requestId, controller);
-
     try {
       if (message.url === "vscode://codex/ipc-request") {
         const payload = parseJsonBody(message.body);
@@ -1156,12 +1164,12 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           },
         };
       case "local-environments":
-        return {
+        return this.getCachedHostFetchResponse(path, body, 2_000, async () => ({
           status: 200,
           body: {
             environments: [],
           },
-        };
+        }));
       case "codex-home":
         return {
           status: 200,
@@ -1214,14 +1222,14 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           },
         };
       case "open-in-targets":
-        return {
+        return this.getCachedHostFetchResponse(path, body, 2_000, async () => ({
           status: 200,
           body: {
             preferredTarget: null,
             targets: [],
             availableTargets: [],
           },
-        };
+        }));
       case "gh-cli-status":
         return {
           status: 200,
@@ -1283,10 +1291,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           },
         };
       case "git-origins":
-        return {
+        return this.getCachedHostFetchResponse(path, body, 2_000, async () => ({
           status: 200,
           body: await resolveGitOrigins(body, this.getGitOriginFallbackDirectories()),
-        };
+        }));
       case "git-create-branch":
         return {
           status: 200,
@@ -1404,6 +1412,13 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private async handleRelativeFetchRequest(
     url: string,
   ): Promise<{ status: number; body: unknown } | null> {
+    if (/^\/aip\/connectors\/[^/]+\/logo(?:\?.*)?$/.test(url)) {
+      return {
+        status: 204,
+        body: null,
+      };
+    }
+
     if (url === "/wham/accounts/check") {
       return {
         status: 200,
@@ -1545,9 +1560,35 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     return sanitized;
   }
 
-  private writeGlobalState(body: unknown): Record<string, never> {
+  private async getCachedHostFetchResponse(
+    path: string,
+    body: unknown,
+    ttlMs: number,
+    load: () => Promise<{ status: number; body: unknown }>,
+  ): Promise<{ status: number; body: unknown }> {
+    const cacheKey = buildHostFetchCacheKey(path, body);
+    const now = Date.now();
+    const cached = this.hostFetchCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.response;
+    }
+
+    const response = await load();
+    this.hostFetchCache.set(cacheKey, {
+      expiresAt: now + ttlMs,
+      response,
+    });
+    return response;
+  }
+
+  private writeGlobalState(body: unknown): { success: boolean } {
     if (!isJsonRecord(body) || typeof body.key !== "string") {
-      return {};
+      return { success: false };
+    }
+
+    const previousValue = this.globalState.get(body.key);
+    if (previousValue === body.value) {
+      return { success: true };
     }
 
     this.globalState.set(body.key, body.value);
@@ -1562,7 +1603,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         type: "pinned-threads-updated",
       });
     }
-    return {};
+    return { success: true };
   }
 
   private setThreadPinned(body: unknown): Record<string, never> {
@@ -1808,7 +1849,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private async sendLocalRequest(method: string, params?: unknown): Promise<unknown> {
     const id = `pocodex-local-${++this.nextRequestId}`;
     return new Promise<unknown>((resolve, reject) => {
-      this.localRequests.set(id, { resolve, reject });
+      this.localRequests.set(id, { method, startedAt: Date.now(), resolve, reject });
       this.sendJsonRpcMessage({
         id,
         method,
@@ -1855,6 +1896,14 @@ function buildIpcSuccessResponse(requestId: string, result: unknown): JsonRecord
 function isMethodNotFoundError(message: string): boolean {
   const normalized = message.toLowerCase();
   return normalized.includes("method not found") || normalized.includes("-32601");
+}
+
+function buildHostFetchCacheKey(path: string, body: unknown): string {
+  try {
+    return `${path}:${JSON.stringify(body ?? null)}`;
+  } catch {
+    return path;
+  }
 }
 
 async function resolveGitOrigins(
