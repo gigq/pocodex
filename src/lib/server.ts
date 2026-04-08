@@ -544,12 +544,7 @@ export class PocodexServer {
 
     this.refreshTerminalOwner(route);
     if (route.ownerBrowserSessionId !== session.id) {
-      this.sendTerminalError(
-        session.id,
-        requestedLocalSessionId,
-        "Another browser controls this terminal.",
-      );
-      return;
+      this.claimTerminalOwnership(route, session.id);
     }
 
     await this.options.relay.forwardBridgeMessage({
@@ -596,12 +591,7 @@ export class PocodexServer {
 
     route.localSessionIdsByBrowserSessionId.set(session.id, localSessionId);
     session.terminalSessionIdsByLocalSessionId.set(localSessionId, route.id);
-    if (!route.participantOrder.includes(session.id)) {
-      route.participantOrder.push(session.id);
-    }
-    if (!route.ownerBrowserSessionId) {
-      route.ownerBrowserSessionId = session.id;
-    }
+    this.claimTerminalOwnership(route, session.id);
   }
 
   private handleTargetedTerminalRelayMessage(message: JsonRecord & { type: string }): boolean {
@@ -747,6 +737,14 @@ export class PocodexServer {
       return session ? route.localSessionIdsByBrowserSessionId.has(session.id) : false;
     });
     route.ownerBrowserSessionId = route.participantOrder[0] ?? null;
+  }
+
+  private claimTerminalOwnership(route: TerminalSessionRoute, browserSessionId: string): void {
+    route.participantOrder = route.participantOrder.filter(
+      (sessionId) => sessionId !== browserSessionId,
+    );
+    route.participantOrder.push(browserSessionId);
+    route.ownerBrowserSessionId = browserSessionId;
   }
 
   private broadcast(envelope: ServerToBrowserEnvelope): void {
